@@ -2,22 +2,18 @@
 YOLO comparison on Modal: from-scratch vs. transfer-learning.
 
 Run:
-    modal run yolo_comparison_modal.py
+    modal run modal_train.py
 
 What it does (all on a Modal GPU container):
     1. Downloads COCO128 (Ultralytics auto-pulls it on first train()).
     2. Trains yolov8n from scratch (yolov8n.yaml, no pretrained weights).
     3. Trains yolov8n with transfer learning (yolov8n.pt).
     4. Validates both, reports mAP/precision/recall.
-    5. Runs inference on a fresh test image.
-    6. Returns the two annotated images + a side-by-side comparison and
-       writes them to ./outputs/ on your local machine.
+    5. Runs inference on multiple diverse test images.
+    6. Returns annotated results + comprehensive metrics.
 
 Override settings via CLI:
-    modal run yolo_comparison_modal.py --epochs 80 --imgsz 640 --batch 32
-
-Use your own test image (URL or local path):
-    modal run yolo_comparison_modal.py --test-image ./my_image.jpg
+    modal run modal_train.py --epochs 80 --imgsz 640 --batch 32
 """
 
 from __future__ import annotations
@@ -116,6 +112,38 @@ def _predict(weights_path: str, image_bytes: bytes, imgsz: int) -> tuple[bytes, 
     return buf.getvalue(), detections
 
 
+def _get_test_images() -> dict[str, bytes]:
+    """Load diverse test images from Ultralytics."""
+    import urllib.request
+    images = {}
+    
+    urls = {
+        "bus": "https://ultralytics.com/images/bus.jpg",
+        "zidane": "https://ultralytics.com/images/zidane.jpg",
+        "footage": "https://ultralytics.com/images/football.jpg",
+    }
+    
+    for name, url in urls.items():
+        try:
+            with urllib.request.urlopen(url) as r:
+                images[name] = r.read()
+                print(f"  Loaded {name}")
+        except Exception as e:
+            print(f"  Failed to load {name}: {e}")
+    
+    return images if images else {"bus": _load_default_image()}
+
+
+def _load_default_image() -> bytes:
+    """Fallback to bus image if others fail."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen("https://ultralytics.com/images/bus.jpg") as r:
+            return r.read()
+    except:
+        raise RuntimeError("Could not load any test images")
+
+
 @app.function(gpu=GPU, timeout=TIMEOUT, volumes={CACHE: volume})
 def train_from_scratch(data: str, epochs: int, imgsz: int, batch: int) -> str:
     path = _train_one("yolov8n.yaml", "scratch",
@@ -136,22 +164,33 @@ def train_transfer(data: str, epochs: int, imgsz: int, batch: int) -> str:
 
 @app.function(gpu=GPU, timeout=TIMEOUT, volumes={CACHE: volume})
 def evaluate_and_predict(scratch_pt: str, transfer_pt: str,
-                         test_image: bytes, data: str, imgsz: int) -> dict:
-    """Run validation + inference on the same image with both models."""
+                         test_images: dict[str, bytes], data: str, imgsz: int) -> dict:
+    """Run validation + inference on multiple images with both models."""
     import matplotlib.pyplot as plt
     from PIL import Image
 
     scratch_metrics = _validate(scratch_pt, data, imgsz)
     transfer_metrics = _validate(transfer_pt, data, imgsz)
 
-    scratch_img, scratch_det = _predict(scratch_pt, test_image, imgsz)
-    transfer_img, transfer_det = _predict(transfer_pt, test_image, imgsz)
+    # Process all test images
+    inference_results = {}
+    for img_name, img_bytes in test_images.items():
+        scratch_img, scratch_det = _predict(scratch_pt, img_bytes, imgsz)
+        transfer_img, transfer_det = _predict(transfer_pt, img_bytes, imgsz)
+        
+        inference_results[img_name] = {
+            "scratch": {"image": scratch_img, "detections": scratch_det},
+            "transfer": {"image": transfer_img, "detections": transfer_det},
+        }
 
-    # Side-by-side comparison figure.
+    # Create side-by-side comparison for the first image only
+    first_name = list(test_images.keys())[0]
+    first_scratch = inference_results[first_name]["scratch"]["image"]
+    first_transfer = inference_results[first_name]["transfer"]["image"]
     fig, axes = plt.subplots(1, 2, figsize=(16, 8))
-    axes[0].imshow(Image.open(io.BytesIO(scratch_img)))
+    axes[0].imshow(Image.open(io.BytesIO(first_scratch)))
     axes[0].set_title("From scratch"); axes[0].axis("off")
-    axes[1].imshow(Image.open(io.BytesIO(transfer_img)))
+    axes[1].imshow(Image.open(io.BytesIO(first_transfer)))
     axes[1].set_title("Transfer learning"); axes[1].axis("off")
     plt.tight_layout()
     cmp_buf = io.BytesIO()
@@ -159,25 +198,11 @@ def evaluate_and_predict(scratch_pt: str, transfer_pt: str,
     plt.close(fig)
 
     return {
-        "scratch": {"metrics": scratch_metrics, "detections": scratch_det,
-                     "image_png": scratch_img},
-        "transfer": {"metrics": transfer_metrics, "detections": transfer_det,
-                      "image_png": transfer_img},
+        "scratch_metrics": scratch_metrics,
+        "transfer_metrics": transfer_metrics,
+        "inference_results": inference_results,
         "comparison_png": cmp_buf.getvalue(),
     }
-
-
-def _load_test_image(test_image: str | None) -> bytes:
-    import urllib.request
-    if test_image is None:
-        url = "https://ultralytics.com/images/bus.jpg"
-        with urllib.request.urlopen(url) as r:
-            return r.read()
-    p = Path(test_image)
-    if p.exists():
-        return p.read_bytes()
-    with urllib.request.urlopen(test_image) as r:
-        return r.read()
 
 
 @app.local_entrypoint()
@@ -185,10 +210,11 @@ def main(epochs: int = 50,
          imgsz: int = 640,
          batch: int = 16,
          data: str = "coco128.yaml",
-         test_image: str | None = None,
-        out_dir: str = "results"):
+         out_dir: str = "results"):
     """Orchestrates training, eval, inference. Writes results to ./results/."""
-    test_bytes = _load_test_image(test_image)
+    print("Loading test images...")
+    test_images = _get_test_images()
+    print(f"Loaded {len(test_images)} test images for inference")
 
     print(f"Training (epochs={epochs}, imgsz={imgsz}, batch={batch}, data={data})")
     # Train both models in parallel — independent GPU containers.
@@ -199,60 +225,104 @@ def main(epochs: int = 50,
     print(f"  scratch best : {scratch_pt}")
     print(f"  transfer best: {transfer_pt}")
 
-    print("Evaluating + running inference on test image")
+    print("Evaluating + running inference on test images")
     result = evaluate_and_predict.remote(scratch_pt, transfer_pt,
-                                          test_bytes, data, imgsz)
+                                          test_images, data, imgsz)
 
     out = Path(out_dir)
     figures = out / "figures"
     out.mkdir(parents=True, exist_ok=True)
     figures.mkdir(parents=True, exist_ok=True)
-    (figures / "scratch.png").write_bytes(result["scratch"]["image_png"])
-    (figures / "transfer.png").write_bytes(result["transfer"]["image_png"])
     (figures / "comparison.png").write_bytes(result["comparison_png"])
-    (figures / "test_input.jpg").write_bytes(test_bytes)
+    
+    # Save individual inference results for each test image
+    inference_dir = figures / "inference"
+    inference_dir.mkdir(parents=True, exist_ok=True)
+    for img_name, img_results in result["inference_results"].items():
+        model_dir = inference_dir / img_name
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "scratch.png").write_bytes(img_results["scratch"]["image"])
+        (model_dir / "transfer.png").write_bytes(img_results["transfer"]["image"])
 
+    scratch_metrics = result["scratch_metrics"]
+    transfer_metrics = result["transfer_metrics"]
+    
     metrics_summary = {
         "epochs": epochs,
         "imgsz": imgsz,
         "batch": batch,
         "data": data,
-        "scratch": result["scratch"]["metrics"],
-        "transfer": result["transfer"]["metrics"],
-        "scratch_detections": result["scratch"]["detections"],
-        "transfer_detections": result["transfer"]["detections"],
+        "scratch": scratch_metrics,
+        "transfer": transfer_metrics,
+        "test_images": {name: {
+            "scratch_detections": len(res["scratch"]["detections"]),
+            "transfer_detections": len(res["transfer"]["detections"])
+        } for name, res in result["inference_results"].items()},
     }
     (out / "metrics.json").write_text(json.dumps(metrics_summary, indent=2) + "\n")
-    (out / "metrics.md").write_text(
+    
+    # Generate comprehensive markdown report
+    md_content = (
         "# Experimental Results\n\n"
         f"All runs: YOLOv8n, {data}, {epochs} epochs, {imgsz}x{imgsz}, "
         f"batch {batch}, Tesla T4 (14 913 MiB), seed 0.\n\n"
-        "## Validation metrics\n\n"
-        "| Model | mAP@0.5 | mAP@0.5:0.95 | Precision | Recall | Detections |\n"
-        "|---|---|---|---|---|---|\n"
-        f"| From scratch | {result['scratch']['metrics']['mAP50']:.3f} | {result['scratch']['metrics']['mAP50-95']:.3f} | "
-        f"{result['scratch']['metrics']['precision']:.3f} | {result['scratch']['metrics']['recall']:.3f} | "
-        f"{len(result['scratch']['detections'])} |\n"
-        f"| Transfer learning | {result['transfer']['metrics']['mAP50']:.3f} | {result['transfer']['metrics']['mAP50-95']:.3f} | "
-        f"{result['transfer']['metrics']['precision']:.3f} | {result['transfer']['metrics']['recall']:.3f} | "
-        f"{len(result['transfer']['detections'])} |\n\n"
-        "## Notes\n\n"
-        "- The figures in results/figures/ are generated from the same run.\n"
-        "- The metrics above are written directly from the Modal output.\n"
+        "## Validation Metrics (on train/val split)\n\n"
+        "| Model | mAP@0.5 | mAP@0.5:0.95 | Precision | Recall |\n"
+        "|---|---|---|---|---|\n"
+        f"| From scratch | {scratch_metrics['mAP50']:.3f} | {scratch_metrics['mAP50-95']:.3f} | "
+        f"{scratch_metrics['precision']:.3f} | {scratch_metrics['recall']:.3f} |\n"
+        f"| Transfer learning | {transfer_metrics['mAP50']:.3f} | {transfer_metrics['mAP50-95']:.3f} | "
+        f"{transfer_metrics['precision']:.3f} | {transfer_metrics['recall']:.3f} |\n\n"
+        "## Inference Results on Test Images\n\n"
+        "### Summary: Detection Count per Image\n\n"
+        "| Image | From Scratch | Transfer Learning |\n"
+        "|---|---|---|\n"
     )
+    
+    for img_name, img_results in result["inference_results"].items():
+        scratch_count = len(img_results["scratch"]["detections"])
+        transfer_count = len(img_results["transfer"]["detections"])
+        md_content += f"| {img_name.title()} | {scratch_count} | {transfer_count} |\n"
+    
+    md_content += "\n### Detailed Inference Results\n\n"
+    for img_name, img_results in result["inference_results"].items():
+        md_content += f"#### {img_name.title()}\n\n"
+        md_content += f"**From Scratch Model:** {len(img_results['scratch']['detections'])} detections\n"
+        if img_results['scratch']['detections']:
+            md_content += "```\n"
+            for det in img_results['scratch']['detections']:
+                md_content += f"  {det['class']:<15} conf={det['conf']:.3f}  bbox={det['xyxy']}\n"
+            md_content += "```\n"
+        else:
+            md_content += "(No detections)\n"
+        
+        md_content += f"\n**Transfer Learning Model:** {len(img_results['transfer']['detections'])} detections\n"
+        if img_results['transfer']['detections']:
+            md_content += "```\n"
+            for det in img_results['transfer']['detections']:
+                md_content += f"  {det['class']:<15} conf={det['conf']:.3f}  bbox={det['xyxy']}\n"
+            md_content += "```\n"
+        else:
+            md_content += "(No detections)\n"
+        
+        md_content += f"\n![{img_name} - From Scratch](figures/inference/{img_name}/scratch.png)\n"
+        md_content += f"![{img_name} - Transfer Learning](figures/inference/{img_name}/transfer.png)\n\n"
+    
+    (out / "metrics.md").write_text(md_content)
 
     print("\n=== Validation metrics ===")
     fmt = "{:<22}{:>10}{:>12}{:>10}{:>10}".format
     print(fmt("model", "mAP@50", "mAP@50-95", "P", "R"))
-    for label, key in [("From scratch", "scratch"), ("Transfer learning", "transfer")]:
-        m = result[key]["metrics"]
+    for label, m in [("From scratch", scratch_metrics), ("Transfer learning", transfer_metrics)]:
         print(f"{label:<22}{m['mAP50']:>10.3f}{m['mAP50-95']:>12.3f}"
               f"{m['precision']:>10.3f}{m['recall']:>10.3f}")
 
-    for label, key in [("From scratch", "scratch"), ("Transfer learning", "transfer")]:
-        dets = result[key]["detections"]
-        print(f"\n--- {label}: {len(dets)} detections ---")
-        for d in dets:
-            print(f"  {d['class']:<15} conf={d['conf']:.3f}  bbox={d['xyxy']}")
+    print("\n=== Inference Results ===")
+    for img_name, img_results in result["inference_results"].items():
+        print(f"\n{img_name}:")
+        scratch_dets = img_results["scratch"]["detections"]
+        transfer_dets = img_results["transfer"]["detections"]
+        print(f"  From scratch: {len(scratch_dets)} detections")
+        print(f"  Transfer learning: {len(transfer_dets)} detections")
 
     print(f"\nWrote results to {out.resolve()}/")

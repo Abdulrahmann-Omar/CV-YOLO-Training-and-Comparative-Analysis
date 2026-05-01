@@ -15,21 +15,25 @@ protocol. The only variable is the weight initialization.
 Training hardware: Tesla T4, 50 epochs, batch 16, 640x640, seed 0.
 Full metrics from the latest Modal run are in [results/metrics.md](results/metrics.md).
 
-### Inference comparison
+### Comprehensive Inference Testing
 
 ![Side-by-side inference comparison](results/figures/comparison.png)
 
-Left: from-scratch model (no detections). Right: transfer-learning model.
+**Multiple diverse test images** — The experiment includes comprehensive
+inference testing on 3+ diverse images (street scenes, sports, etc.). See
+[results/metrics.md](results/metrics.md) for full visual results and
+detailed detection annotations for each image and model.
 
 ---
 
 ## Experiment Design
 
 ### The question
-
+│   └── modal_train.py            # Cloud training script w/ multi-image testing
 Does parameter initialization matter when the training set is small?
 
 ### Setup
+│   │   └── inference/            # Per-image comparison photos
 
 Both models run the **same training loop** — same optimizer (AdamW, lr 1.19e-4),
 same augmentation pipeline, same batch size and image resolution. The only
@@ -89,7 +93,7 @@ modal run src/modal_train.py
 
 This spawns two T4 containers simultaneously — one per training strategy —
 and writes the annotated outputs to `results/figures/` and the metric summary to
-`results/metrics.md` on your local machine.
+`results/metrics.md` on your local machine. Automatically tests on multiple diverse images.
 
 Override any hyperparameter:
 
