@@ -1,7 +1,7 @@
 # YOLOv8 Training Strategy Comparison: From Scratch vs. Transfer Learning
-
+ 
 A controlled experiment comparing two parameter initialization strategies for
-object detection on a limited-data regime. Both models share identical
+object detection on a limited-data regime. Both models share identicals
 architecture (YOLOv8n), dataset (COCO128), hyperparameters, and evaluation
 protocol. The only variable is the weight initialization.
 
