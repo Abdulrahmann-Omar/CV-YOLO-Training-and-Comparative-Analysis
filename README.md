@@ -168,11 +168,5 @@ starting point that the tiny COCO128 regime cannot recover from scratch.
 
 ## References
 
-- Redmon, J. et al. "You Only Look Once: Unified, Real-Time Object Detection."
-  CVPR 2016.
-- Wang, C.-Y. et al. "YOLOv7: Trainable bag-of-freebies sets new
-  state-of-the-art for real-time object detectors." CVPR 2023.
+
 - Jocher, G. et al. Ultralytics YOLOv8. https://github.com/ultralytics/ultralytics
-- Lin, T.-Y. et al. "Microsoft COCO: Common Objects in Context." ECCV 2014.
-- Yosinski, J. et al. "How transferable are features in deep neural networks?"
-  NeurIPS 2014.
